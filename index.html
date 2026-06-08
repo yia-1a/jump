@@ -1,0 +1,599 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>經典跳一跳 - 限時挑戰雙角色版</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+        body, html {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #e4e7ec;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+        }
+        #game-container {
+            position: relative;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background: url('background.png') no-repeat center center;
+            background-size: cover;
+        }
+        canvas {
+            display: block;
+            background: transparent;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.15);
+        }
+        #ui-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            padding: 30px;
+        }
+        #score-box {
+            font-size: 48px;
+            font-weight: bold;
+            color: #3a3a5c;
+            text-shadow: 2px 2px 0px rgba(255,255,255,0.7);
+        }
+        #tip-box {
+            text-align: center;
+            font-size: 16px;
+            color: #5a5a7a;
+            margin-bottom: 20px;
+            font-weight: bold;
+            text-shadow: 1px 1px 0px rgba(255,255,255,0.5);
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0% { opacity: 0.6; }
+            50% { opacity: 1; }
+            100% { opacity: 0.6; }
+        }
+        #game-over-screen {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(58, 58, 92, 0.4);
+            backdrop-filter: blur(5px);
+            -webkit-backdrop-filter: blur(5px);
+            display: none;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 10;
+        }
+        .modal {
+            background: white;
+            padding: 40px;
+            border-radius: 20px;
+            text-align: center;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.2);
+            max-width: 90%;
+            width: 320px;
+        }
+        .modal h2 {
+            color: #3a3a5c;
+            margin-bottom: 20px;
+            font-size: 28px;
+        }
+        .modal p {
+            font-size: 18px;
+            color: #555;
+            margin: 10px 0;
+        }
+        .modal span {
+            font-weight: bold;
+            font-size: 22px;
+            color: #e74c3c;
+        }
+        #restart-btn {
+            margin-top: 25px;
+            padding: 12px 35px;
+            background-color: #3a3a5c;
+            color: white;
+            border: none;
+            border-radius: 25px;
+            font-size: 18px;
+            cursor: pointer;
+            transition: transform 0.1s, background-color 0.2s;
+            box-shadow: 0 5px 15px rgba(58,58,92,0.3);
+        }
+        #restart-btn:active {
+            transform: scale(0.95);
+            background-color: #272744;
+        }
+    </style>
+</head>
+<body>
+
+<div id="game-container">
+    <canvas id="gameCanvas"></canvas>
+    
+    <div id="ui-layer">
+        <div id="score-box">0</div>
+        <div id="tip-box">踩中 character2 的格子可額外加 5 分！(限5步內)</div>
+    </div>
+
+    <div id="game-over-screen">
+        <div class="modal">
+            <h2>遊戲結束</h2>
+            <p>本次得分：<span id="final-score">0</span></p>
+            <p style="font-size:14px; color:#888;">歷史最高：<span id="high-score" style="font-size:16px; color:#3a3a5c;">0</span></p>
+            <button id="restart-btn">再試一次</button>
+        </div>
+    </div>
+</div>
+
+<script>
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    const scoreBox = document.getElementById('score-box');
+    const gameOverScreen = document.getElementById('game-over-screen');
+    const finalScoreSpan = document.getElementById('final-score');
+    const highScoreSpan = document.getElementById('high-score');
+    const restartBtn = document.getElementById('restart-btn');
+
+    let gameState = 'IDLE'; 
+    let score = 0;
+    let highScore = localStorage.getItem('jump_highscore') || 0;
+
+    const viewWidth = 450;
+    const viewHeight = 700;
+    
+    let audioCtx = null;
+    let chargeOsc = null;
+    let chargeGain = null;
+
+    // 載入自訂圖片資源
+    const charImg = new Image();
+    charImg.src = 'character.png';
+
+    // 新增：載入主角2圖片
+    const char2Img = new Image();
+    char2Img.src = 'character2.png';
+
+    const pillarImages = [];
+    for (let i = 1; i <= 10; i++) {
+        const img = new Image();
+        img.src = `pillar${i}.png`;
+        pillarImages.push(img);
+    }
+
+    function initAudio() {
+        if (!audioCtx) {
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        }
+    }
+
+    function playTone(freq, type, duration, slideTo) {
+        if (!audioCtx) return;
+        try {
+            let osc = audioCtx.createOscillator();
+            let gainNode = audioCtx.createGain();
+            osc.type = type || 'sine';
+            osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+            if (slideTo) {
+                osc.frequency.exponentialRampToValueAtTime(slideTo, audioCtx.currentTime + duration);
+            }
+            gainNode.gain.setValueAtTime(0.1, audioCtx.currentTime);
+            gainNode.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + duration);
+            osc.connect(gainNode);
+            gainNode.connect(audioCtx.destination);
+            osc.start();
+            osc.stop(audioCtx.currentTime + duration);
+        } catch (e) {}
+    }
+
+    function startChargeSound() {
+        if (!audioCtx) return;
+        try {
+            chargeOsc = audioCtx.createOscillator();
+            chargeGain = audioCtx.createGain();
+            chargeOsc.type = 'sine';
+            chargeOsc.frequency.setValueAtTime(300, audioCtx.currentTime);
+            chargeOsc.frequency.linearRampToValueAtTime(700, audioCtx.currentTime + 2);
+            chargeGain.gain.setValueAtTime(0.05, audioCtx.currentTime);
+            chargeOsc.connect(chargeGain);
+            chargeGain.connect(audioCtx.destination);
+            chargeOsc.start();
+        } catch (e) {}
+    }
+
+    function stopChargeSound() {
+        if (chargeOsc) {
+            try { chargeOsc.stop(); } catch(e){}
+            chargeOsc = null;
+        }
+    }
+
+    let blocks = [];
+    let currentBlockIndex = 0;
+    
+    let player = {
+        x: 0,
+        y: 0,
+        startX: 0,
+        startY: 0,
+        targetX: 0,
+        targetY: 0,
+        jumpProgress: 0,
+        jumpYOffset: 0,
+        chargePower: 0,
+        maxCharge: 100,
+        fallRotation: 0,
+        size: 16 
+    };
+
+    let camera = {
+        x: 0,
+        y: 0,
+        targetX: 0,
+        targetY: 0
+    };
+
+    const maxJumpDistance = 260; 
+    const minJumpDistance = 40;
+
+    function resize() {
+        const scale = Math.min(window.innerWidth / viewWidth, window.innerHeight / viewHeight);
+        canvas.width = viewWidth * window.devicePixelRatio;
+        canvas.height = viewHeight * window.devicePixelRatio;
+        canvas.style.width = (viewWidth * scale) + 'px';
+        canvas.style.height = (viewHeight * scale) + 'px';
+        ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    // 產生新方塊並決定是否生成 character2
+    function spawnBlock() {
+        let lastBlock = blocks[blocks.length - 1];
+        let distance = Math.random() * 130 + 110; 
+        let size = Math.random() * 20 + 35; 
+        
+        let direction = Math.random() > 0.5 ? 'right' : 'left';
+        let angle = direction === 'right' ? -Math.PI / 6 : -Math.PI * 5 / 6;
+        
+        let nextX = lastBlock.x + Math.cos(angle) * distance;
+        let nextY = lastBlock.y + Math.sin(angle) * distance;
+        
+        let randomPillarIndex = Math.floor(Math.random() * 10);
+
+        // 檢查當前地圖上是否已經存在尚未消失的 character2
+        let hasActiveChar2 = blocks.some(b => b.hasCharacter2);
+
+        // 隨機決定此方塊是否生成 character2 (30% 機率，且場上同時只存活一隻)
+        let spawnChar2 = (!hasActiveChar2 && Math.random() < 0.3);
+
+        blocks.push({
+            x: nextX,
+            y: nextY,
+            size: size,
+            pillarIdx: randomPillarIndex,
+            direction: direction,
+            hasCharacter2: spawnChar2,     // 是否擁有 character2
+            character2JumpsLeft: spawnChar2 ? 5 : 0 // 剩餘步數限制（5格內）
+        });
+    }
+
+    function initGame() {
+        score = 0;
+        currentBlockIndex = 0;
+        gameState = 'IDLE';
+        scoreBox.innerText = score;
+        gameOverScreen.style.display = 'none';
+
+        blocks = [{
+            x: viewWidth / 2,
+            y: viewHeight * 0.7,
+            size: 45,
+            pillarIdx: 0,
+            direction: 'right',
+            hasCharacter2: false,
+            character2JumpsLeft: 0
+        }];
+
+        spawnBlock();
+        spawnBlock();
+
+        player.x = blocks[0].x;
+        player.y = blocks[0].y;
+        player.jumpProgress = 0;
+        player.jumpYOffset = 0;
+        player.chargePower = 0;
+        player.fallRotation = 0;
+
+        camera.x = blocks[0].x - viewWidth / 2;
+        camera.y = blocks[0].y - viewHeight * 0.65;
+        camera.targetX = camera.x;
+        camera.targetY = camera.y;
+    }
+
+    // 扣除場上所有 character2 的生命步數
+    function updateCharacter2Steps() {
+        blocks.forEach(b => {
+            if (b.hasCharacter2) {
+                b.character2JumpsLeft--;
+                // 如果超過 5 格/步沒有跳到，他就消失
+                if (b.character2JumpsLeft <= 0) {
+                    b.hasCharacter2 = false;
+                }
+            }
+        });
+    }
+
+    function drawBlock(b) {
+        let cx = b.x - camera.x;
+        let cy = b.y - camera.y;
+        
+        let img = pillarImages[b.pillarIdx];
+        let imgW = b.size * 2.4; 
+        let imgH = imgW * 1.3; 
+        
+        let offsetX = cx - imgW / 2;
+        let offsetY = cy - imgH * 0.22;
+
+        // 1. 繪製柱子
+        if (img.complete && img.naturalWidth !== 0) {
+            ctx.drawImage(img, offsetX, offsetY, imgW, imgH);
+        } else {
+            ctx.save();
+            ctx.fillStyle = 'rgba(127, 140, 141, 0.6)';
+            ctx.beginPath();
+            ctx.ellipse(cx, cy, b.size, b.size * 0.55, 0, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+        }
+
+        // 2. 新增：如果此方塊有 character2，將他繪製在柱子上方
+        if (b.hasCharacter2) {
+            ctx.save();
+            // 讓 character2 站在柱子表面中心點
+            ctx.translate(cx, cy);
+
+            const c2W = 38;
+            const c2H = 56;
+
+            if (char2Img.complete && char2Img.naturalWidth !== 0) {
+                // 垂直以腳底為基準點錨定 (-c2H)
+                ctx.drawImage(char2Img, -c2W / 2, -c2H + 4, c2W, c2H);
+            } else {
+                // 備用紅色方塊代號
+                ctx.fillStyle = '#e74c3c';
+                ctx.fillRect(-12, -40, 24, 40);
+            }
+
+            // 貼心小UI：在 character2 頭頂繪製倒數步數與提示文字
+            ctx.fillStyle = '#e74c3c';
+            ctx.font = 'bold 13px sans-serif';
+            ctx.textAlign = 'center';
+            // 加點白邊讓字體在暗色背景更清晰
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = 3;
+            ctx.strokeText(`⏳ 剩 ${b.character2JumpsLeft} 步`, 0, -c2H - 8);
+            ctx.fillText(`⏳ 剩 ${b.character2JumpsLeft} 步`, 0, -c2H - 8);
+
+            ctx.fillStyle = '#f1c40f';
+            ctx.font = 'bold 11px sans-serif';
+            ctx.strokeText(`+5分`, 0, -c2H - 24);
+            ctx.fillText(`+5分`, 0, -c2H - 24);
+
+            ctx.restore();
+        }
+    }
+
+    function drawPlayer() {
+        let cx = player.x - camera.x;
+        let cy = player.y - camera.y - player.jumpYOffset;
+
+        ctx.save();
+        ctx.translate(cx, cy);
+
+        if (gameState === 'CHARGING') {
+            let ratio = player.chargePower / player.maxCharge;
+            ctx.scale(1 + ratio * 0.2, 1 - ratio * 0.3);
+        } else if (gameState === 'FALLING') {
+            ctx.rotate(player.fallRotation);
+        }
+
+        ctx.fillStyle = 'rgba(0,0,0,0.15)';
+        ctx.beginPath();
+        ctx.ellipse(0, 2, player.size * 1.1, player.size * 0.5, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        const charW = 42;
+        const charH = 62;
+
+        if (charImg.complete && charImg.naturalWidth !== 0) {
+            ctx.drawImage(charImg, -charW / 2, -charH + 3, charW, charH);
+        } else {
+            ctx.fillStyle = '#2c3e50';
+            ctx.beginPath();
+            ctx.arc(0, -25, player.size * 0.8, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = '#34495e';
+            ctx.fillRect(-player.size*0.6, -20, player.size*1.2, 20);
+        }
+
+        ctx.restore();
+    }
+
+    function checkLandingSuccess(px, py, block) {
+        let dx = Math.abs(px - block.x);
+        let dy = Math.abs(py - block.y);
+        let vSize = block.size * 0.55; 
+        return (dx / (block.size + 4)) + (dy / (vSize + 4 * 0.55)) <= 1;
+    }
+
+    function handlePressStart(e) {
+        if (e.cancelable) e.preventDefault();
+        initAudio();
+        if (gameState !== 'IDLE') return;
+
+        gameState = 'CHARGING';
+        player.chargePower = 0;
+        startChargeSound();
+    }
+
+    function handlePressEnd(e) {
+        if (gameState !== 'CHARGING') return;
+        stopChargeSound();
+        playTone(400, 'triangle', 0.15, 200);
+
+        gameState = 'JUMPING';
+        player.startX = player.x;
+        player.startY = player.y;
+        player.jumpProgress = 0;
+
+        let nextBlock = blocks[currentBlockIndex + 1];
+        let angle = Math.atan2(nextBlock.y - blocks[currentBlockIndex].y, nextBlock.x - blocks[currentBlockIndex].x);
+        
+        let pct = player.chargePower / player.maxCharge;
+        let actualDist = minJumpDistance + pct * (maxJumpDistance - minJumpDistance);
+
+        player.targetX = player.startX + Math.cos(angle) * actualDist;
+        player.targetY = player.startY + Math.sin(angle) * actualDist;
+    }
+
+    window.addEventListener('mousedown', handlePressStart, {passive: false});
+    window.addEventListener('mouseup', handlePressEnd);
+    window.addEventListener('touchstart', handlePressStart, {passive: false});
+    window.addEventListener('touchend', handlePressEnd);
+
+    restartBtn.addEventListener('click', (e) => {
+        e.stopPropagation(); 
+        initGame();
+    });
+
+    function update() {
+        if (gameState === 'CHARGING') {
+            if (player.chargePower < player.maxCharge) {
+                player.chargePower += 1.6; 
+            }
+        }
+
+        if (gameState === 'JUMPING') {
+            player.jumpProgress += 0.04; 
+            if (player.jumpProgress >= 1) {
+                player.jumpProgress = 1;
+                player.x = player.targetX;
+                player.y = player.targetY;
+                player.jumpYOffset = 0;
+                
+                let nextBlock = blocks[currentBlockIndex + 1];
+                let currBlock = blocks[currentBlockIndex];
+
+                if (checkLandingSuccess(player.x, player.y, nextBlock)) {
+                    player.x = nextBlock.x; 
+                    player.y = nextBlock.y;
+                    currentBlockIndex++;
+                    
+                    // 檢查新落腳的方塊上有沒有 character2
+                    if (blocks[currentBlockIndex].hasCharacter2) {
+                        score += 6; // 基礎 1 分 + 額外獎勵 5 分 = 6 分
+                        blocks[currentBlockIndex].hasCharacter2 = false; // 吃到後消失
+                        
+                        // 播放特殊的獲得獎勵高音效
+                        playTone(523.25, 'sine', 0.06);
+                        setTimeout(() => playTone(659.25, 'sine', 0.06), 50);
+                        setTimeout(() => playTone(783.99, 'sine', 0.06), 100);
+                        setTimeout(() => playTone(1046.50, 'sine', 0.15), 150);
+                    } else {
+                        score++; // 普通加 1 分
+                        playTone(523.25, 'sine', 0.08); 
+                        setTimeout(() => playTone(659.25, 'sine', 0.12), 60);
+                    }
+                    
+                    scoreBox.innerText = score;
+
+                    // 玩家進行了一次有效跳躍，結算所有場上 character2 的步數
+                    updateCharacter2Steps();
+
+                    spawnBlock();
+                    gameState = 'IDLE';
+
+                    camera.targetX = blocks[currentBlockIndex].x - viewWidth / 2;
+                    camera.targetY = blocks[currentBlockIndex].y - viewHeight * 0.65;
+                } 
+                else if (checkLandingSuccess(player.x, player.y, currBlock)) {
+                    // 原地跳躍沒前進
+                    player.x = currBlock.x;
+                    player.y = currBlock.y;
+                    gameState = 'IDLE';
+                    playTone(300, 'sine', 0.1);
+
+                    // 原地跳躍同樣算消耗 1 步
+                    updateCharacter2Steps();
+                } 
+                else {
+                    gameState = 'FALLING';
+                    player.fallRotation = 0;
+                    playTone(220, 'sawtooth', 0.3, 90);
+                }
+                player.chargePower = 0;
+            } else {
+                player.x = player.startX + (player.targetX - player.startX) * player.jumpProgress;
+                player.y = player.startY + (player.targetY - player.startY) * player.jumpProgress;
+                player.jumpYOffset = Math.sin(player.jumpProgress * Math.PI) * 110; 
+            }
+        }
+
+        if (gameState === 'FALLING') {
+            player.jumpYOffset -= 4; 
+            player.fallRotation += 0.15; 
+            if (player.jumpYOffset < -70) {
+                gameState = 'GAMEOVER';
+                if (score > highScore) {
+                    highScore = score;
+                    localStorage.setItem('jump_highscore', highScore);
+                }
+                finalScoreSpan.innerText = score;
+                highScoreSpan.innerText = highScore;
+                gameOverScreen.style.display = 'flex';
+            }
+        }
+
+        camera.x += (camera.targetX - camera.x) * 0.08;
+        camera.y += (camera.targetY - camera.y) * 0.08;
+    }
+
+    function render() {
+        ctx.clearRect(0, 0, viewWidth, viewHeight);
+
+        let startRender = Math.max(0, currentBlockIndex - 2);
+        let endRender = Math.min(blocks.length, currentBlockIndex + 4);
+        for (let i = startRender; i < endRender; i++) {
+            drawBlock(blocks[i]);
+        }
+
+        drawPlayer();
+
+        update();
+        requestAnimationFrame(render);
+    }
+
+    initGame();
+    requestAnimationFrame(render);
+</script>
+
+</body>
+</html>s
